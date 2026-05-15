@@ -1,0 +1,18 @@
+/* 1. 背景透明，干掉顶部分割线 */
+#footer {
+    background: transparent !important;
+}
+#footer::before {
+    display: none !important;
+}
+
+/* 2. 差别强制页脚及其内部的所有元素（不管嵌套多少层）全部变成纯黑 */
+#footer, 
+#footer * {
+    color: #000000 !important;
+}
+
+/* 3. 保留一下链接悬停变蓝的特效（如果不需要可以直接删掉这三行） */
+#footer a:hover {
+    color: #49b1f5 !important;
+}
