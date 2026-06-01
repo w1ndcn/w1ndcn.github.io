@@ -1,0 +1,987 @@
+<?xml version="1.0" encoding="utf-8"?>
+<search>
+  <entry>
+    <title>PHP 魔术方法讲解</title>
+    <url>/posts/c5e7a9d2</url>
+    <content><![CDATA[PHP 魔术方法讲解
+魔术方法（Magic Methods）是 PHP 中以双下划线 __ 开头的特殊方法，它们在特定条件下由 PHP 自动调用，无需手动触发。掌握它们的触发时机和参数传递机制，是理解 PHP 面向对象和反序列化漏洞的基础。
+
+
+总览：魔术方法触发条件速查
+
+
+魔术方法
+触发条件
+参数
+
+
+
+__construct()
+new 实例化对象时
+构造参数
+
+
+__destruct()
+对象被销毁时（脚本结束或无引用）
+无
+
+
+__sleep()
+serialize() 序列化时
+无，需返回数组
+
+
+__wakeup()
+unserialize() 反序列化时
+无
+
+
+__toString()
+对象被当作字符串使用时（echo&#x2F;print 等）
+无，需返回字符串
+
+
+__invoke()
+对象被当作函数调用时
+调用参数
+
+
+__clone()
+clone 克隆对象时
+无
+
+
+__call()
+调用不存在的方法时
+($方法名, $参数数组)
+
+
+__callStatic()
+静态调用不存在的方法时
+($方法名, $参数数组)
+
+
+__get()
+访问不存在的属性时
+($属性名)
+
+
+__set()
+设置不存在的属性时
+($属性名, $属性值)
+
+
+__isset()
+对不存在的属性使用 isset()&#x2F;empty() 时
+($属性名)
+
+
+__unset()
+对不存在的属性使用 unset() 时
+($属性名)
+
+
+
+__construct() — 构造函数触发时机： 使用 new 实例化对象时自动调用，且仅在实例化时触发一次。
+&lt;?phpclass User &#123;    public $username;    public function __construct($username) &#123;        $this-&gt;username = $username;    &#125;&#125;$test = new User(&quot;benben&quot;);$ser = serialize($test);unserialize($ser);?&gt;
+
+说明： 第 8 行 new User(&quot;benben&quot;) 触发 __construct()。注意，unserialize() 创建对象时不会触发 __construct()，因为反序列化是直接从字符串恢复对象状态，而非走正常的实例化流程。
+
+__destruct() — 析构函数触发时机： 对象不再被使用（无引用）或脚本执行结束时，PHP 垃圾回收机制销毁对象并自动调用。
+&lt;?phpclass User &#123;    public function __destruct() &#123;        echo &quot;__destruct()&quot;;    &#125;&#125;$test = new User(&quot;benben&quot;);$ser = serialize($test);unserialize($ser);?&gt;
+
+两次触发的详细分析：
+
+第一次触发： 第 8 行创建的 $test 对象。当脚本运行到 ?&gt; 结束时，所有变量被销毁，$test 指向的对象触发 __destruct()。
+
+第二次触发： 第 10 行 unserialize($ser) 在内存中重新创建了一个新对象。但因为没有将结果赋值给任何变量（没有写 $a = unserialize($ser)），这个临时对象在当行执行完后就没有任何引用了，PHP 认为它已无用，立即销毁，触发第二次 __destruct()。
+
+
+
+安全视角： 这正是反序列化漏洞利用的关键——攻击者可以通过控制序列化数据，在 __destruct() 中执行危险操作。即使没有变量接收反序列化结果，对象也会被创建并最终触发析构。
+
+
+__sleep() — 序列化前置钩子触发时机： 对对象调用 serialize() 时，PHP 会先检查类中是否存在 __sleep()。
+
+如果存在： 先执行 __sleep()，然后根据其返回值（一个属性名数组）决定序列化哪些属性。
+如果不存在： 默认序列化对象中所有属性（包括私有属性）。
+
+&lt;?phpclass User &#123;    const SITE = &#x27;uusama&#x27;;    public $username;    public $nickname;    private $password;    public function __construct($username, $nickname, $password) &#123;        $this-&gt;username = $username;        $this-&gt;nickname = $nickname;        $this-&gt;password = $password;    &#125;    public function __sleep() &#123;        return array(&#x27;username&#x27;, &#x27;nickname&#x27;);    &#125;&#125;$user = new User(&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;);echo serialize($user);
+
+输出：
+O:4:&quot;User&quot;:2:&#123;s:8:&quot;username&quot;;s:1:&quot;a&quot;;s:8:&quot;nickname&quot;;s:1:&quot;b&quot;;&#125;
+
+说明： __sleep() 返回了 array(&#39;username&#39;, &#39;nickname&#39;)，所以序列化结果中只包含这两个属性，$password 被忽略了。__sleep() 的作用就是精准控制哪些属性参与序列化——常用于过滤敏感数据（如密码、密钥）或执行序列化前的清理工作（如关闭数据库连接、保存文件句柄状态）。
+
+__wakeup() — 反序列化前置钩子触发时机： 对字符串调用 unserialize() 时，PHP 会先检查类中是否存在 __wakeup()，如果存在则先执行它，再完成反序列化。
+&lt;?phpclass User &#123;    const SITE = &#x27;uusama&#x27;;    public $username;    public $nickname;    private $password;    private $order;    public function __wakeup() &#123;        $this-&gt;password = $this-&gt;username;    &#125;&#125;$user_ser = &#x27;O:4:&quot;User&quot;:2:&#123;s:8:&quot;username&quot;;s:1:&quot;a&quot;;s:8:&quot;nickname&quot;;s:1:&quot;b&quot;;&#125;&#x27;;var_dump(unserialize($user_ser));?&gt;
+
+输出：
+object(User)#1 (4) &#123;    [&quot;username&quot;]=&gt; string(1) &quot;a&quot;    [&quot;nickname&quot;]=&gt; string(1) &quot;b&quot;    [&quot;password&quot;:&quot;User&quot;:private]=&gt; string(1) &quot;a&quot;    [&quot;order&quot;:&quot;User&quot;:private]=&gt; NULL&#125;
+
+说明： __wakeup() 在反序列化时被触发，将 password 属性的值设为 username 的值（即 &quot;a&quot;）。这里序列化字符串只传了 2 个属性（username 和 nickname），但 __wakeup() 可以用来初始化或修正未被序列化的属性。
+
+与 __destruct() 的联动： unserialize() 的完整流程是：创建对象 → __wakeup() → 对象可用 → 对象销毁时 __destruct()。所以反序列化可能同时触发这两个方法。
+
+__wakeup() 绕过 — CVE-2016-7124影响版本： PHP5 &lt; 5.6.25，PHP7 &lt; 7.0.10
+原理： 当序列化字符串中声明的属性个数大于实际属性个数时，__wakeup() 会被跳过，但反序列化仍然正常执行。
+正常情况（属性个数 = 2，会触发 __wakeup）O:4:&quot;test&quot;:2:&#123;s:2:&quot;v1&quot;;s:6:&quot;benben&quot;;s:2:&quot;v2&quot;;s:3:&quot;123&quot;;&#125;绕过情况（属性个数改为 3，跳过 __wakeup）O:4:&quot;test&quot;:3:&#123;s:2:&quot;v1&quot;;s:6:&quot;benben&quot;;s:2:&quot;v2&quot;;s:3:&quot;123&quot;;&#125;
+
+只需要将对象标识符后的属性个数从 2 改为 3（或其他比实际值大的数），即可绕过 __wakeup() 的执行。这在 CTF 中是经典的考点。
+
+__toString() — 对象转字符串触发时机： 当对象被当作字符串使用时自动调用，例如 echo、print、字符串拼接等操作。
+&lt;?phpclass User &#123;    var $benben = &quot;this is test!!&quot;;    public function __toString() &#123;        return &#x27;正确!&#x27;;    &#125;&#125;$test = new User();print_r($test);    // 正常输出对象结构，不触发 __toString()echo $test;        // 触发 __toString()，输出&quot;正确!&quot;?&gt;
+
+说明： print_r() 和 var_dump() 不会触发 __toString()，因为它们的作用是调试输出对象结构。而 echo 要求参数是字符串，当传入对象时就会触发 __toString()。方法必须返回一个字符串，否则会报错。
+
+__invoke() — 对象当函数调用触发时机： 当对象被当作函数调用时（即 $obj() 的形式）自动触发。
+&lt;?phpclass User &#123;    var $benben = &quot;this is test!!&quot;;    public function __invoke() &#123;        echo &#x27;它不是函数!&#x27;;    &#125;&#125;$test = new User();echo $test-&gt;benben;    // 正常访问属性，输出&quot;this is test!!&quot;$test();               // 把对象当函数调用，触发 __invoke()，输出&quot;它不是函数!&quot;?&gt;
+
+说明： $test-&gt;benben 是正常的属性访问，而 $test() 是将整个对象当作函数来调用，PHP 会自动拦截并执行 __invoke()。
+
+错误调用的拦截方法__call() — 调用不存在的方法触发时机： 调用一个对象中不存在的方法时自动触发。
+参数： __call($方法名, $参数数组) — 第一个参数是不存在的方法名，第二个参数是调用时传入的参数数组。
+&lt;?phpclass User &#123;    public function __call($arg1, $arg2) &#123;        echo &quot;$arg1,$arg2[0]&quot;;    &#125;&#125;$test = new User();$test-&gt;callxxx(&#x27;a&#x27;);    // callxxx 方法不存在，触发 __call()                         // 输出：callxxx,a?&gt;
+
+说明： $test-&gt;callxxx(&#39;a&#39;) 中 callxxx 不存在，__call() 接收到 $arg1 = &quot;callxxx&quot;、$arg2 = [&quot;a&quot;]。
+__callStatic() — 静态调用不存在的方法触发时机： 使用 :: 静态调用符号调用一个不存在的方法时触发。
+参数： 同 __call()，为 __callStatic($方法名, $参数数组)。
+&lt;?phpclass User &#123;    public function __callStatic($arg1, $arg2) &#123;        echo &quot;$arg1,$arg2[0]&quot;;    &#125;&#125;$test = new User();$test::callxxx(&#x27;a&#x27;);    // 静态调用不存在的方法，触发 __callStatic()                         // 输出：callxxx,a?&gt;
+
+说明： :: 是 PHP 的静态调用符号（也用于调用类常量和静态属性）。此处 callxxx 不是静态方法，触发 __callStatic()。
+__get() — 访问不存在的属性触发时机： 访问一个对象中不存在的属性时触发。
+参数： __get($属性名) — 传入被访问的属性名。
+&lt;?phpclass User &#123;    public $var1;    public function __get($arg1) &#123;        echo $arg1;    &#125;&#125;$test = new User();$test-&gt;var2;    // var2 属性不存在，触发 __get()，输出&quot;var2&quot;?&gt;
+
+说明： $var1 是存在的属性，访问它不会触发 __get()。而 $var2 不存在，触发 __get() 并将属性名 &quot;var2&quot; 传入。在 CTF 中，__get() 常被用于构造 POP 链——通过访问一个不存在的属性来跳转到另一个对象的某个方法。
+__set() — 设置不存在的属性触发时机： 给一个不存在的属性赋值时触发。
+参数： __set($属性名, $属性值) — 传入属性名和要赋的值。
+
+逻辑与 __get() 对称：__get() 是读不存在的属性，__set() 是写不存在的属性。
+
+__isset() — 对不存在的属性使用 isset()&#x2F;empty()触发时机： 对不存在的属性使用 isset() 或 empty() 时触发。
+参数： __isset($属性名) — 传入被检测的属性名。
+__unset() — 对不存在的属性使用 unset()触发时机： 对不存在的属性使用 unset() 时触发。
+参数： __unset($属性名) — 传入被销毁的属性名。
+&lt;?phpclass User &#123;    private $var;    public function __unset($arg1) &#123;        echo $arg1;    &#125;&#125;$test = new User();unset($test-&gt;var);    // $var 是 private，从外部不可见，等同于不存在，触发 __unset()                       // 输出：var?&gt;
+
+说明： 此处 $var 虽然在类中定义了，但它是 private 的。从类外部访问时，PHP 将其视为不可访问&#x2F;不存在，因此 unset() 操作触发了 __unset()。
+
+__clone() — 克隆对象时触发触发时机： 使用 clone 关键字克隆对象时，在新对象上自动调用。
+&lt;?phpclass User &#123;    private $var;    public function __clone() &#123;        echo &quot;__clone test&quot;;    &#125;&#125;$test = new User();$newclass = clone($test);    // 触发 __clone()，输出&quot;__clone test&quot;?&gt;
+
+说明： clone 创建的是对象的浅拷贝。__clone() 在副本对象上执行，可以用来修正深拷贝需要处理的引用类型属性（如重新初始化内部对象引用，避免两个对象共享同一个子对象）。
+
+附录：反序列化 POP 链常见触发链路在 CTF 和安全审计中，理解魔术方法的触发顺序是构造 POP（Property-Oriented Programming）链的前提：
+unserialize() → __wakeup() → 对象可用 → __destruct()echo $obj     → __toString() → __invoke() / __call()$obj-&gt;prop    → __get() → __call() / __invoke()$obj-&gt;method()→ __call() → __get() / __toString()
+
+典型利用思路：
+
+找到可利用的 __destruct() 或 __wakeup() 作为入口
+在其中寻找对其他对象属性的操作，触发 __get() &#x2F; __call() &#x2F; __toString() 等跳板
+最终跳到能执行危险操作的方法（如 eval()、system() 等）作为终点
+
+]]></content>
+      <categories>
+        <category>CTF学习</category>
+      </categories>
+      <tags>
+        <tag>PHP</tag>
+        <tag>魔术方法</tag>
+        <tag>面向对象</tag>
+        <tag>反序列化</tag>
+        <tag>CTF</tag>
+        <tag>POP链</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>linux suid提权</title>
+    <url>/posts/461ef5b5</url>
+    <content><![CDATA[先看普通文件权限
+查看文件当前权限
+ls -l filename-rw-r--r-- 1 username username 138 Mar 28 15:12 test.jwt
+
+下面按字段拆开理解这个输出。
+-rw-r--r--：文件类型与权限
+
+第 1 个字符 -：代表这是一个普通文件。
+接下来每三个字符为一组，分别代表：
+
+文件所有者（Owner）
+文件所属组（Group）
+其他所有人（Others）
+
+
+第 2-4 个字符 rw-：代表**文件所有者（Owner）**的权限。username（用户）拥有可读（r）和可写&#x2F;修改（w）权限，但不能执行（执行位是 -）。
+
+第 5-7 个字符 r--：代表**文件所属组（Group）**的权限。同属于 username 用户组的其他成员只能读取（r），不能修改。
+
+第 8-10 个字符 r--：代表**其他所有人（Others）**的权限。同样是只能读取（r）。
+
+
+1：硬链接数
+
+表示有 1 个文件名指向该文件的物理数据块（普通文件通常都是 1）。
+
+username：文件所有者
+
+这个文件的拥有者是用户 username。
+
+username：文件所属的用户组
+
+这个文件被分配给了名为 username 的用户组。在 Linux 系统中，创建一个新用户时，通常会自动创建一个与用户名同名的专属用户组。
+
+138：文件大小
+
+文件大小为 138 字节（Bytes）
+
+Mar 28 15:12：最后修改时间
+test.jwt：文件名
+
+如何判断一个文件是否设置了 SUID
+要查看一个文件是否设置了 SUID（Set-User-ID） 权限，依然只需要使用我们刚才讨论过的 ls -l 命令。
+关键在于观察文件权限的 第 4 个字符，也就是文件所有者（Owner）执行权限 x 所在的位置。
+正常的权限如果是 rwx，加上 SUID 后会出现以下情况。
+出现小写字母 s（最常见且有效）
+
+示例： -rwsr-xr-x
+含义： 这个文件原本就拥有执行权限（x），并且被设置了 SUID。这是 SUID 的正常工作状态。
+
+出现大写字母 S（通常是配置错误）
+
+示例： -rwSr--r--
+含义： 这个文件被设置了 SUID，但是它本身并没有执行权限（原本是 -）。因为文件连运行都运行不了，所以这个 SUID 其实是无效的。系统用大写 S 来提醒你这里存在逻辑冲突。
+
+如果没有 s
+
+输出的权限中没有 s，则表示尚未设置 SUID。
+
+可以直接看一个常见例子：
+ls -l /usr/bin/passwd-rwsr-xr-x 1 root root 114072 Sep 17  2025 /usr/bin/passwd
+
+
+如何设置 SUID
+设置 SUID 时，通常使用 chmod 命令。
+基本语法
+语法结构是：
+chmod [谁][操作][权限] 文件名
+[谁]（Who）
+
+u（User）&#x3D; 文件所有者
+g（Group）&#x3D; 所属群组
+o（Others）&#x3D; 其他人
+a（All）&#x3D; 所有人（等同于 ugo）
+
+[操作]（Operator）
+
++ &#x3D; 添加权限
+- &#x3D; 移除权限
+= &#x3D; 设定为唯一权限（覆盖原有权限）
+
+[权限]（Permission）
+
+r
+w
+x
+s
+
+设置命令示例
+chmod u+s filename
+
+
+u+s 表示给文件所有者（user）增加 SUID 权限。
+
+确认设置结果
+再次查看文件权限：
+ls -l filename
+
+如果文件权限中显示类似 -rwsr-xr-x（注意 s），说明 SUID 设置成功。
+
+如何查找已有 SUID 的文件
+在渗透测试或提权场景中，最常做的一步就是先把系统里已有的 SUID 文件找出来。
+常用查找命令
+find / -user root -perm -4000 2&gt;/dev/nullfind / -perm -4000 -type f 2&gt;/dev/nullfind / -perm -u=s -type f 2&gt;/dev/nullfind / -user root -perm -4000 -exec ls -ldb &#123;&#125; \; 2&gt;/dev/nullfind / -perm -u=s -type f 2&gt;/dev/null/表示从文件系统的顶部（根）开始并找到每个目录-perm 表示搜索随后的权限-u = s表示查找root用户拥有的文件-4000：查找 SUID 文件（权限位的 SUID 为 4）-type表示我们正在寻找的文件类型f 表示常规文件，而不是目录或特殊文件2表示该进程的第二个文件描述符，即stderr（标准错误）&gt;表示重定向/dev/null是一个特殊的文件系统对象，它将丢弃写入其中的所有内容。
+
+每条命令的含义
+find / -user root -perm -4000 2&gt;/dev/null
+作用：只找那些”属于 root 且带有 SUID”的文件，并打印路径。
+
+-user root：增加了一个过滤条件，文件拥有者必须是最高管理员 root。这是渗透测试中最常敲的命令，因为只有拿到属于 root 的 SUID 文件，黑客才有机会借此变成 root。
+
+find / -perm -4000 -type f 2&gt;/dev/null
+作用：寻找全系统所有带有 SUID 的”普通文件”（不限拥有者）。
+
+-type f：指定只查找普通文件（file）。排除了目录、软链接等其他类型，让结果更精准。
+注意这里去掉了 -user root，所以它也会把你系统中其他普通用户设置了 SUID 的文件一并找出来。
+
+find / -perm -u=s -type f 2&gt;/dev/null
+作用：和第 2 条命令的效果 100% 一样，只是写法不同。
+
+-perm -u=s：这里使用了符号表示法来代替数字表示法。-u=s 的意思就是”User（所有者）被设置了 S 权限”。
+
+find / -user root -perm -4000 -exec ls -ldb {} \;
+作用：不仅找出 root 的 SUID 文件，还会立刻把它们的详细权限信息列出来。
+这条命令最长，但也最实用，因为它能让你直接看到文件的详细状态。
+
+-exec ... {} \;：这是 find 命令的高级玩法。它的意思是：对每一个找到的文件（用 {} 代表），都去执行后面的那串命令，最后用 \; 结尾。
+ls -ldb：也就是对找到的文件执行 ls。
+l：使用长格式（就像你一开始问的那样，显示 -rwsr-xr-x 详细信息）。
+d：如果是目录，只显示目录本身的属性，不显示里面的内容。
+b：这是一个安全参数（打印不可见字符的转义序列）。如果故意把文件名改成带换行符等奇怪字符的乱码，-b 可以把它们转义显示出来，防止终端显示错乱。
+
+
+
+
+查询GTFOBins
+访问GTFOBins搜索命令(github项目离线版下载)，例如find、less、awk等
+例如: 利用find
+如果suid允许执行find：
+find . -exec /bin/sh -p \; -quit
+
+
+
+关于 $PATH 的理解
+这一部分虽然不是直接讲 SUID，但它和命令执行路径、环境变量理解密切相关，放在一起很有参考价值。
+/usr/local/sbin/usr/local/bin/usr/sbin/usr/bin:/sbin/bin:/usr/games/usr/local/games
+
+当你敲下一个命令时，系统就会严格按照从上到下的顺序去这些目录里挨个查找。
+为了更容易理解，我们可以先记住两个核心词根：
+
+bin（binaries）：存放普通用户就能用的常规命令（比如 ls、find）。
+sbin（system binaries）：存放只有管理员（Root）或者加了 sudo 才能执行的系统级管理命令（比如重启系统、格式化硬盘的命令）。
+
+掌握了这两个词根后，再来看这份列表的具体分工就会清晰很多。
+管理员设置区（最高优先级）
+
+/usr/local/sbin：系统管理员自己手动编译、安装的底层系统管理命令。
+/usr/local/bin：系统管理员自己手动编译、安装的常规软件或命令。
+Linux 默认”管理员手动安装的软件优先级最高”。如果管理员装了一个新版本的工具，系统会优先用它，而不是系统自带的老版本。
+
+官方标准软件区
+
+/usr/sbin：通过官方应用商店（如 apt）安装的系统级管理命令。
+/usr/bin：通过官方应用商店安装的绝大多数普通命令（你的 find 原生文件就住在这里）。
+这是系统中程序最庞大、最集中的地方。
+
+系统核心区
+
+/sbin：系统启动、修复和最基础运行所必须的核心系统命令。
+/bin：系统启动和进入单用户模式（类似于 Windows 的安全模式）所必须的最基础常规命令。
+
+游戏区
+
+/usr/games：系统官方包管理器安装的游戏。
+/usr/local/games：你自己手动下载安装的游戏。
+把游戏和核心工作命令分开，是老派 UNIX 系统留下来的优良传统。
+
+]]></content>
+      <categories>
+        <category>CTF学习</category>
+      </categories>
+      <tags>
+        <tag>Linux</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>git 基本命令速查</title>
+    <url>/posts/72800349</url>
+    <content><![CDATA[查看全局配置# 配置全局用户名git config --global user.name &quot;你的用户名&quot;# 配置全局邮箱git config --global user.email &quot;你的邮箱地址&quot;# 查看当前全局配置git config --list
+
+配置 SSH 密钥连接 GitHub使用 SSH 连接可以免去每次推送代码时输入密码的麻烦。
+生成本地 SSH 密钥对：
+ssh-keygen -t ed25519 -C &quot;your_email@example.com&quot;
+
+按三下回车（保持默认路径、不设置密钥密码）即可生成。
+查看并复制公钥内容：
+# macOS / Linux 查看命令cat ~/.ssh/id_ed25519.pub# Windows (Git Bash) 查看命令cat ~/.ssh/id_ed25519.pub
+
+复制输出的全部内容（以 ssh-ed25519 开头，你的邮箱结尾）。
+将公钥添加到 GitHub：
+
+登录 GitHub -&gt; 点击右上角头像 -&gt; Settings。
+左侧菜单选择 SSH and GPG keys。
+点击右上角 New SSH key。
+Title 随意填写（如 “Macbook Pro”），Key 粘贴刚刚复制的内容，点击 Add SSH key。
+
+测试 SSH 连接是否成功：
+ssh -T git@github.com
+
+如果提示 Are you sure you want to continue connecting (yes/no/[fingerprint])?，输入 yes 并回车。看到 Hi [你的用户名]! You&#39;ve successfully authenticated... 即表示连接成功。
+
+创建与初始化仓库克隆现有的远程仓库# 使用 SSH 地址克隆（推荐）git clone 远程仓库的SSH地址# 使用 HTTPS 地址克隆git clone 远程仓库的HTTPS地址
+
+
+本地项目文件夹关联远程仓库# 进入项目目录后执行，将其初始化为 Git 仓库git init# 将本地仓库与远程 GitHub 仓库进行关联git remote add origin 远程仓库的SSH地址# 查看当前关联的远程仓库地址及权限git remote -v# 修改已有的远程仓库地址git remote set-url origin 新的仓库地址(SSH)
+
+origin 是远程仓库地址(例如: git@github.com:username&#x2F;my-awesome-project.git)的一个“代号”或“别名”
+日常开发：暂存与提交查看当前仓库状态# 查看有哪些文件被修改了、哪些是未跟踪的新文件git status
+
+添加到暂存区 (Staging Area)# 添加指定文件到暂存区git add filename.py# 添加当前目录下的所有修改及新文件到暂存区（最常用）git add .
+
+提交到本地仓库 (Repository)# 将暂存区的内容提交，并记录本次提交的说明信息git commit -m &quot;填写本次修改的日志信息（如：修复登录Bug）&quot;# 跳过暂存区直接提交（仅适用于对已跟踪文件的修改，不包含新文件）git commit -am &quot;修改日志&quot;# 首次推送新分支：建立本地分支与远程分支的关联，并推送git push -u origin 分支名# 之后非首次推送：在已建立关联的分支上，直接推送即可git push
+
+拉取与更新 (Pull &#x2F; Fetch)# 获取远程仓库的最新更新信息，但暂不合并到本地代码git fetch origin# 拉取远程指定分支的最新代码，并自动与本地当前分支合并（最常用）git pull origin 分支名# 如果已经建立了追踪关系，直接输入 pull 即可(可以通过 git branch -vv 查看本地分支与远程分支的追踪/对应关系)git pull
+
+查看提交日志# 查看详细的历史提交记录git log# 以单行精简模式查看历史记录git log --oneline# 查看分支演进图git log --oneline --graph --all
+
+
+分支管理 (Branching)分支是 Git 的核心利器，支持多人协同开发而互不干扰。
+查看分支# 查看所有本地分支（当前所在分支前面会有 * 号并高亮）git branch# 查看所有本地分支和远程分支git branch -a# 查看本地分支与远程分支的追踪/对应关系git branch -vv
+
+新建分支# 仅仅创建新分支，但仍停留在当前分支git branch 新分支名# 创建并切换到该新分支git switch -c 新分支名
+
+建立分支关系# 切换到你的新分支git switch dev# 第一次推送并建立追踪关系git push -u origin dev
+
+切换分支# 切换到已有的分支git switch 分支名
+
+合并分支 (Merge)# 1. 先切换到你想要合并进去的目标分支git switch main# 2. 将指定分支的修改合并到当前 main 分支git merge 被合并的分支名
+
+删除分支# 删除一个已经合并过的本地分支git branch -d 分支名# 强制删除一个还未合并的本地分支git branch -D 分支名# 删除远程仓库中的指定分支git push origin --delete 远程分支名
+
+
+撤销与版本回滚注意：涉及 --hard 的回滚操作会抹除未提交的工作，请务必谨慎使用。
+
+
+撤销工作区的修改（未执行 git add）# 丢弃某个文件在工作区的所有未暂存修改git restore filename.py
+
+撤销暂存区的修改（已执行 git add，但未 git commit）# 将文件从暂存区撤回到工作区（保留修改内容）git restore --staged filename.py
+
+修改最后一次提交（未推送到远程）# 发现刚提交的 commit 注释写错了，或者漏掉了某个文件git commit --amend -m &quot;新的正确提交信息&quot;
+
+版本回退 (Reset)# 【软回退】回退到指定版本，保留你写的所有代码修改，修改内容会停留在暂存区git reset --soft 提交的CommitID# 【硬回退】彻底回退到指定版本！本地工作区没保存的代码、新写的代码会全部消失！git reset --hard 提交的CommitID# 回退到上一个版本git reset --hard HEAD^
+]]></content>
+      <categories>
+        <category>Git</category>
+      </categories>
+      <tags>
+        <tag>git</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Hermes Agent 完全配置手册</title>
+    <url>/posts/d7c3e4f1</url>
+    <content><![CDATA[
+来源：Hermes 官方文档、CSDN、腾讯云开发者社区、Hermes 中文社区
+
+
+
+📎 官方社区安装配置文档 — 遇到问题先查这里
+
+
+安装与更新# macOS / Linux 一键安装curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash# 国内加速镜像curl -fsSL https://res1.hermesagent.org.cn/install.sh | bash# 安装后重载 shellsource ~/.zshrc# 验证hermes --versionhermes doctor          # 检查依赖和配置是否完整# 更新hermes update
+
+安装后核心目录：
+~/.hermes/├── config.yaml         # 全局配置主文件├── .env                # API Key 等敏感凭证├── skills/             # 技能目录├── profiles/           # 多 Profile├── sessions/           # 会话记录└── logs/               # 日志
+
+
+常用命令速查启动与恢复hermes                       # classic CLIhermes --tui                 # TUI 模式hermes --tui -c              # 恢复最近会话hermes --tui -r &lt;session_id&gt; # 恢复指定会话# 默认 TUI：在 shell profile 中设置export HERMES_TUI=1
+
+工具与技能管理hermes tools list            # 列出所有工具及状态hermes tools enable NAME     # 启用工具集hermes tools disable NAME    # 禁用工具集hermes skills list           # 已安装技能列表hermes skills search QUERY   # 搜索技能hermes skills install ID     # 安装技能hermes skills browse         # 浏览所有可用技能
+
+状态诊断hermes doctor           # 检查依赖和配置hermes status           # 显示组件状态hermes insights         # 使用分析
+
+会话内斜杠命令
+参考：斜杠命令参考
+
+
+
+
+命令
+作用
+
+
+
+/new &#x2F; /reset
+开始新会话
+
+
+/clear
+清屏并开始新会话
+
+
+/retry
+重试最后一条消息
+
+
+/undo
+撤销上一轮对话
+
+
+/title
+命名当前会话
+
+
+/sessions
+浏览并恢复历史会话
+
+
+/model
+切换模型（TUI 下按提供商分组带费用提示）
+
+
+/usage
+Token 用量 &#x2F; 费用 &#x2F; 上下文面板
+
+
+/compress
+手动压缩上下文（刷新记忆 + 摘要）
+
+
+/stop
+终止所有后台进程
+
+
+/bg &#x2F; /btw
+在后台独立会话中运行任务
+
+
+/help
+显示帮助信息
+
+
+/reload
+热加载 .env 变量到运行中会话
+
+
+/reload-skills
+重载技能目录
+
+
+/reload-mcp
+重载 MCP 服务器
+
+
+/plugins
+列出已安装插件及状态
+
+
+/skills
+搜索、安装、管理 skill
+
+
+
+CC Switch — 多 CLI 模型管理CC Switch 是一款桌面 GUI 工具，统一管理 Claude Code、Codex、Gemini CLI、OpenCode、Hermes Agent 等多款 AI CLI 工具的 API 后端、MCP 服务器和用量统计。
+核心能力：
+
+一键切换 Provider：管理各 CLI 工具的 API 后端，内置 50+ 中转节点预设
+MCP 服务器统一管理：支持 stdio&#x2F;http&#x2F;sse，添加一次即可同步到所有客户端
+跨工具用量统计
+
+brew install cc-switch
+
+
+CC Switch 通过自定义（custom）添加模型，支持 API 同步。
+
+
+
+Web 搜索与内容提取后端Hermes 采用 后端分离 模式：搜索和提取可指向不同提供商，按需组合以降低成本。
+# 按能力分离web:  search_backend: &quot;searxng&quot;     # 搜索用自托管  extract_backend: &quot;firecrawl&quot;  # 提取用专业服务# 或用单一后端web:  backend: &quot;tavily&quot;
+
+
+参考：Web 搜索配置文档（含各提供商注册方法）
+
+
+
+
+提供商
+搜索
+提取
+爬取
+免费额度
+
+
+
+Firecrawl
+✔
+✔
+✔
+500&#x2F;月
+
+
+SearXNG（自托管 Docker）
+✔
+—
+—
+免费
+
+
+Brave Search
+✔
+—
+—
+2000&#x2F;月
+
+
+DDGS（pip install ddgs）
+✔
+—
+—
+免费无限制
+
+
+Tavily（推荐）
+✔
+✔
+✔
+1000&#x2F;月
+
+
+Exa
+✔
+✔
+—
+1000&#x2F;月
+
+
+三列能力说明
+搜索 → 给定关键词，返回 URL + 摘要列表。Hermes 用它”发现”页面
+提取 → 给定 URL，抓取全文并清洗成 Markdown。Hermes 用它”读”页面
+爬取 → 递归遍历子链接，批量提取多个页面
+
+SearXNG 自托管# docker-compose.ymlservices:  searxng:    image: searxng/searxng:latest    ports: [&quot;8888:8080&quot;]    environment:      - SEARXNG_BASE_URL=http://localhost:8888/
+
+# settings.yml — 必须启用 JSON APIformats:  - html  - json
+
+长页面提取机制页面 &lt;5k 字符原样返回，5k–500k 自动摘要（上限 5k），500k–2M 分块并行，&gt;2M 拒绝。
+专用摘要模型配置web_extract:  provider:        # 低成本模型处理结果  model:   base_url:   api_key: &quot;&quot;  timeout: 360  extra_body: &#123;&#125;
+
+
+Camofox 防爬浏览器Camofox 是一台 隐身浏览器引擎，专门渲染动态 JS 页面、模拟真人浏览器指纹以绕过反爬检测。它不直接提取内容，而是作为浏览器后端供 Hermes 的 browser_navigate + browser_console 工具链调用。
+
+安装
+
+# 第 1 步：npm 全局安装（自动触发 postinstall 下载浏览器内核）npm install -g camofox-browser# 第 2 步：验证camofox --version
+
+
+⚠️ 如果下载卡住&#x2F;超时，可以启用代理手动补跑：
+cd /opt/homebrew/lib/node_modules/camofox-browserALL_PROXY=http://127.0.0.1:7890 npx camoufox-js fetch
+# 第 3 步：启动服务（后台常驻，监听 localhost:9377）cd /opt/homebrew/lib/node_modules/camofox-browsernpm start
+
+
+📌 Camofox 必须保持运行，占用 ~200-300MB 内存。Hermes 会自动检查端口 9377，不通则自动唤醒。
+
+配置# ~/.hermes/config.yamlbrowser:  engine: camofox
+
+# ~/.hermes/.envCAMOFOX_URL=http://localhost:9377
+
+验证hermes doctor
+
+
+静态普通页面 → web_extract；有反爬&#x2F;动态页面 → Camofox + browser 工具链
+
+
+记忆系统 — HindsightHermes 有两种记忆层：常规记忆（memory 工具写入，约 2200 字符，直接注入到 LLM 上下文）和 Hindsight 长期记忆。
+Hindsight 从对话中自动提取实体、关系和时间线索，构建成知识图谱并持久化到独立存储。每次会话开始时，Hindsight 自动检索相关记忆注入上下文——即使隔了几周，也能记得用户的环境配置、偏好和项目决策。
+初次配置hermes memory setup
+
+可选Cloud储存（配置方便但是额度少） → 输入 API Key（官网可申领），向导会自动写入配置。
+Cloud 到期后切换本地Hindsight 支持 Cloud 和 Local 两种运行模式。Cloud 到期后无需重装，只需重新执行一次配置向导：
+hermes memory setup
+
+交互时选择 local_embedded，向导会自动启动守护进程和内嵌 PostgreSQL，配置无缝迁移。
+中文优化：替换嵌入与重排序模型默认的英文嵌入&#x2F;重排序模型在处理中文内容时召回效果不理想。在 ~/.hermes/.env 追加以下环境变量，替换为中文优化版：
+HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL=BAAI/bge-small-zh-v1.5HINDSIGHT_API_RERANKER_LOCAL_MODEL=maidalun1020/bce-reranker-base_v1HINDSIGHT_API_RERANKER_LOCAL_TRUST_REMOTE_CODE=true
+
+模型下载（国内镜像）Hindsight 本地模式需要下载两种模型：嵌入模型（将文本转为向量）和 重排序模型（精排检索结果）。通过 Hugging Face 国内镜像下载：
+# 1️⃣ 下载嵌入模型（BAAI/bge-small-zh-v1.5，384维，轻量中文）HF_ENDPOINT=https://hf-mirror.com python3 -c &quot;from sentence_transformers import SentenceTransformerSentenceTransformer(&#x27;BAAI/bge-small-zh-v1.5&#x27;)print(&#x27;嵌入模型下载完成&#x27;)&quot;
+
+# 2️⃣ 下载重排序模型（maidalun1020/bce-reranker-base_v1，中文通用）HF_ENDPOINT=https://hf-mirror.com python3 -c &quot;from sentence_transformers import CrossEncoderCrossEncoder(&#x27;maidalun1020/bce-reranker-base_v1&#x27;, trust_remote_code=True)print(&#x27;重排序模型下载完成&#x27;)&quot;
+
+下载完成后，在 .env 中追加离线标记，避免每次启动联网检查：
+echo &quot;HF_HUB_OFFLINE=1&quot; &gt;&gt; ~/.hermes/.env
+
+
+切换不同维度的嵌入模型后，务必清空 memory_units（旧向量与新模型不兼容）。
+
+可选模型列表以下为兼容的中文&#x2F;多语言模型，可按需替换（无需额外下载方式，修改 .env 变量名后重复上述步骤即可）。
+
+
+
+用途
+模型
+维度
+说明
+
+
+
+嵌入
+BAAI/bge-small-zh-v1.5
+384
+轻量够用
+
+
+嵌入
+BAAI/bge-base-zh-v1.5
+768
+质量更好，资源消耗中等
+
+
+嵌入
+BAAI/bge-large-zh-v1.5
+1024
+最佳质量，适合离线服务器
+
+
+嵌入
+BAAI/bge-m3
+1024
+多语言（100+语言），非纯中文场景推荐
+
+
+嵌入
+intfloat/multilingual-e5-small
+384
+微软多语言 E5 轻量版
+
+
+嵌入
+intfloat/multilingual-e5-base
+768
+微软多语言 E5 中等版
+
+
+重排序
+maidalun1020/bce-reranker-base_v1
+—
+中文通用
+
+
+重排序
+BAAI/bge-reranker-v2-m3
+—
+多语言 reranker，与 bge-m3 搭配
+
+
+重排序
+BAAI/bge-reranker-v2-gemma
+—
+质量更高，资源需求大
+
+
+
+切换不同维度的嵌入模型后，务必清空 memory_units（旧向量与新模型不兼容）。
+
+参考：完整配置以下为 Hindsight 本地模式的完整配置示例：
+~/.hermes/.env（Hindsight 相关变量）:
+HINDSIGHT_API_KEY=sk-...HINDSIGHT_API_LLM_API_KEY=sk-...HINDSIGHT_API_LLM_BASE_URL=https://token.sensenova.cn/v1HINDSIGHT_API_LLM_MODEL=deepseek-v4-flashHINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL=BAAI/bge-small-zh-v1.5HINDSIGHT_API_RERANKER_LOCAL_MODEL=maidalun1020/bce-reranker-base_v1HINDSIGHT_API_RERANKER_LOCAL_TRUST_REMOTE_CODE=trueHF_HUB_OFFLINE=1
+
+~/.hindsight/profiles/hermes/config.json:
+// 交互配置生成内容&#123;  &quot;mode&quot;: &quot;local_embedded&quot;,  &quot;llm_provider&quot;: &quot;openai_compatible&quot;,  &quot;llm_api_key&quot;: &quot;sk-...&quot;,  &quot;llm_base_url&quot;: &quot;https://token.sensenova.cn/v1&quot;,  &quot;llm_model&quot;: &quot;deepseek-v4-flash&quot;,  &quot;recall_budget&quot;: &quot;mid&quot;&#125;
+
+~/.hermes/config.yaml（启用 Hindsight）:
+memory:  provider: hindsight
+
+诊断与日志hermes memory status               # 查看记忆系统运行状态cat ~/.hindsight/profiles/hermes.log  # 查看 Hindsight 守护进程日志
+
+
+MCP 服务器配置MCP（Model Context Protocol）是让 Hermes 连接外部能力的标准协议，支持 stdio（子进程）和 HTTP（远程）两种传输方式。工具注册后以 mcp_{服务器名}_{工具名} 格式注入 Hermes 工具集。
+mcp_servers:  # stdio 模式  cua-driver:    command: /Users/matebook/.local/bin/cua-driver    args: [&quot;mcp&quot;]  # npx 模式  filesystem:    command: &quot;npx&quot;    args: [&quot;-y&quot;, &quot;@modelcontextprotocol/server-filesystem&quot;, &quot;/tmp&quot;]  # HTTP 模式  remote_api:    url: &quot;https://mcp.example.com/mcp&quot;    headers:      Authorization: &quot;Bearer sk-...&quot;
+
+hermes mcp list           # 列出已配置 MCP 服务器hermes mcp add NAME       # 新增hermes mcp remove NAME    # 移除hermes mcp test NAME      # 测试连接
+
+
+Token 成本管控Tokescale — Token 用量监控专为 Hermes 等 AI 编码助手设计的 CLI 监控工具，支持 TUI 可视化 + JSON 导出。
+npx tokscale@latesttokscale --hermes              # 只看 Hermestokscale --hermes --week       # 近 7 天趋势tokscale --json                # JSON 导出tokscale models                # 按模型统计
+
+
+RTK — 终端 Token 降本RTK（Rust Token Killer） 是 Rust 写的零依赖终端输出过滤代理，自动压缩 ls、git status、npm test 等命令输出，减少 60%-90% 的无效 Token。通过 Hermes 插件机制拦截 terminal 调用，用 rtk rewrite 压缩后再执行。
+安装与配置brew install rtkrtk --version# 安装 Hermes 插件（关键步骤）rtk init --agent hermes -g
+
+
+⚠️ 注意区别： rtk init -g 装的是 Claude Code Hook（对 Hermes 无效），rtk init --agent hermes -g 装的才是 Hermes 插件。
+
+插件结构~/.hermes/plugins/rtk-rewrite/├── __init__.py    ← pre_tool_call Hook：拦截 terminal 命令└── plugin.yaml    ← 插件清单
+
+工作原理terminal(&quot;git status&quot;)    ↓rtk-rewrite 插件 → rtk rewrite &quot;git status&quot;    ↓有压缩版？ → 替换命令 → 输出压缩 → 省 60-90% Token无压缩版？ → 原样放行
+
+查看节省量rtk gain    # 显示累计节省的 Token 量
+
+
+配置后需重启 Hermes 会话（/new）插件才能加载。fail open 策略：rtk 出错或超时时命令照常执行。
+
+
+自我进化（Self-Evolution）Hermes 有两层进化机制：
+内置：自动技能创建（日常使用）每次完成复杂任务（5+ 工具调用），Hermes 自动评估流程价值，生成可复用的 SKILL.md 到 ~/.hermes/skills/。下次遇到类似场景自动匹配调用——“AI 自己总结 skill”。
+外挂：Self-Evolution 研究项目（深度优化）基于 DSPy + GEPA（遗传-帕累托进化算法，ICLR 2026 Oral），对已有 Skill 做进化式优化。
+git clone https://github.com/NousResearch/hermes-agent-self-evolution.gitcd hermes-agent-self-evolutionpip install -e &quot;.[dev]&quot;export HERMES_AGENT_REPO=~/.hermes/hermes-agent# 进化已有 Skillpython -m evolution.skills.evolve_skill \    --skill github-code-review \    --iterations 10 \    --eval-source sessiondb
+
+
+
+
+进化对象
+说明
+
+
+
+Skill
+优化 SKILL.md 步骤、提示词、约束条件
+
+
+工具描述
+让 LLM 更好理解每个工具
+
+
+System Prompt
+优化人设和系统指令
+
+
+代码
+直接优化 Hermes 源码中的工具实现
+
+
+
+项目地址：~/hermes/repos/community/hermes-agent-self-evolution/
+
+
+角色与技能生态agency-agents-zh 是专为中文用户打造的角色仓库，每个角色是独立 .md 文件，包含人设、工作流和可交付成果。对话中直接激活即可。
+
+211 个中文专业角色模板，18 个部门分类
+46 个中国市场原创智能体（小红书、抖音、微信、飞书等）
+GitHub：https://github.com/jnMetaCode/agency-agents-zh
+
+hermes skills search &lt;关键词&gt;    # 搜索技能hermes skills install &lt;ID&gt;      # 安装技能hermes skills browse            # 浏览所有可用技能
+
+
+鸣谢本文整理过程中参考了以下文章，特此感谢：
+
+CSDN — Hermes 全配置指南
+腾讯云开发者社区 — Hermes 使用十件必做的事
+Hermes 中文文档 — Web 搜索功能
+
+]]></content>
+      <categories>
+        <category>Hermes</category>
+      </categories>
+      <tags>
+        <tag>Hermes</tag>
+        <tag>AI Agent</tag>
+        <tag>配置</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>ALGraph 邻接表图结构 —— C 语言实现与命名详解</title>
+    <url>/posts/a8f2b1c3</url>
+    <content><![CDATA[ALGraph 邻接表图结构 —— C 语言实现与命名详解图（Graph）是数据结构中的重要一员，而邻接表（Adjacency List） 是最常用的图存储方式之一。相比邻接矩阵，它在稀疏图场景下更省空间，插入和遍历也更灵活。
+本文通过一个完整的 C 语言实现，结合命名拆解和 ASCII 图解，帮助读者彻底搞懂 ALGraph 的设计思路。
+
+整体结构下图展示了一个 3 顶点 3 条边的无向图在内存中的布局：
+===================================================================================                              [ ALGraph 图的整体结构 ]=================================================================================== ├─ vexnum: 3  (记录当前图有多少个顶点) ├─ arcnum: 3  (记录当前图有多少条边) ├─ kind:   0  (记录图的类型：比如 0 代表无向图) │ └─ vertices   (这是一个 AdjList，本质上就是一个装满 VNode 的大数组)      │      ▼   [ VNode 数组 ]                [ 链表区域：ArcNode 边节点 ]   ┌──────────────┐ 0 │ data: &#x27;A&#x27;    │     (边: 0-&gt;1)                     (边: 0-&gt;2)   │ firstarc ────┼───&gt; ┌────────────────┐           ┌────────────────┐   └──────────────┘     │ adjvex: 1      │(指向1)    │ adjvex: 2      │(指向2)                        │ info: NULL     │(无额外信息)│ info: NULL     │                        │ nextarc ───────┼─────────&gt; │ nextarc: NULL  │(链表结束)                        └────────────────┘           └────────────────┘   ┌──────────────┐ 1 │ data: &#x27;B&#x27;    │     (边: 1-&gt;2)   │ firstarc ────┼───&gt; ┌────────────────┐   └──────────────┘     │ adjvex: 2      │(指向2)                        │ info: 权重等    │                        │ nextarc: NULL  │(链表结束)                        └────────────────┘   ┌──────────────┐ 2 │ data: &#x27;C&#x27;    │     (2号顶点没有向外的连线)   │ firstarc:NULL│───&gt; NULL   └──────────────┘   ┌──────────────┐ 3 │ (空闲未分配)  │   └──────────────┘   ... (一直到 MAX_VERTEX_NUM)
+
+从图中可以看到：
+
+vertices 是一个固定大小的 VNode 数组，下标对应顶点编号
+每个 VNode 的 firstarc 指针指向一条链表，链表中每个节点（ArcNode）表示一条从该顶点出发的边
+因为是无向图，边 0⇄1 会同时出现在顶点 0 和顶点 1 的链表里
+
+
+完整代码#include &lt;stdio.h&gt;#include &lt;stdlib.h&gt;#include &lt;string.h&gt;#define MAX_VERTEX_NUM 100typedef int VertexType;typedef int InfoType;/* *  边节点：ArcNode *  Arc = 弧（有向边称&quot;弧&quot;，无向边称&quot;边 Edge&quot;，教材统一用 Arc） *  每个边节点挂在某个顶点的链表上，描述&quot;从这个顶点出发的一条边&quot; */typedef struct ArcNode&#123;    int adjvex;              // Adjacent + Vertex → 邻接点的下标（连到哪个顶点）    struct ArcNode *nextarc; // Next + Arc → 同起点的下一条边    InfoType *info;          // Information → 边的附加信息（如权重），可为 NULL&#125; ArcNode;/*    *  顶点节点：VNode *  V = Vertex（顶点），Node = 节点 */typedef struct VNode&#123;    VertexType data;   // 顶点自身的数据（编号或名称）    ArcNode *firstarc; // First + Arc → 第一条依附该顶点的边（链表头指针）&#125; VNode;/* AdjList = Adjacency + List → 邻接表   本质：一个装满 VNode 的定长数组，写 AdjList 就等于写 VNode[100] */typedef VNode AdjList[MAX_VERTEX_NUM];/*  *  图结构体：ALGraph *  AL = Adjacency List（邻接表），Graph = 图 *  补充：如果是邻接矩阵表示的图，通常叫 MGraph，M = Matrix（矩阵） */typedef struct&#123;    AdjList vertices;   // Vertex 的复数形式 → 存了所有顶点的大数组    int vexnum, arcnum; // Vex(Vertex) + Number → 顶点数；Arc + Number → 边数    int kind;           // 图的类型（0: 无向图, 1: 有向图, 2: 有向网, 3: 无向网）&#125; ALGraph;/*  *  辅助队列：Queue（供 BFS 使用） *  基于循环队列实现，借 % MAX_VERTEX_NUM 取模实现环形 */typedef struct &#123;    int data[MAX_VERTEX_NUM];     int front;          int rear;                &#125; Queue;/*  添加边： *  在顶点 a 的邻接链表末尾，插入一个指向 b 的 ArcNode *  采用尾插法（保持输入顺序） *  也可以改为头插法：newArc-&gt;nextarc = G-&gt;vertices[a].firstarc */void addEdge(ALGraph *G, int a, int b)&#123;    ArcNode *newArc = (ArcNode *)malloc(sizeof(ArcNode));    newArc-&gt;adjvex  = b;    newArc-&gt;nextarc = NULL;    newArc-&gt;info    = NULL;    if (G-&gt;vertices[a].firstarc == NULL) &#123;        G-&gt;vertices[a].firstarc = newArc;      // 链表为空，直接挂上    &#125; else &#123;        ArcNode *p = G-&gt;vertices[a].firstarc;        while (p-&gt;nextarc != NULL) p = p-&gt;nextarc;  // 走到链表尾部        p-&gt;nextarc = newArc;                         // 尾部接入    &#125;&#125;/*  图的初始化： *  分配 ALGraph 内存，设置顶点数/边数/类型 *  将每个顶点的 data 设为下标 i，firstarc 设为 NULL（还没有边） */ALGraph* InitGraph(int n, int m)&#123;    ALGraph* G = (ALGraph *)malloc(sizeof(ALGraph));    G-&gt;vexnum = n;  // 顶点数    G-&gt;arcnum = m;  // 边数    G-&gt;kind   = 0;  // 0 = 无向图    for (int i = 0; i &lt; n; i++)    &#123;        G-&gt;vertices[i].data     = i;        G-&gt;vertices[i].firstarc = NULL;    &#125;    return G;&#125;/*  *  深度优先遍历 DFS *  思路：一条路走到底，退回再走别的；用递归调用栈（隐式栈）实现 */// 外层：遍历所有顶点，保证非连通图也能完整访问void DFSTraverse(ALGraph *G) &#123;    int visited[MAX_VERTEX_NUM] = &#123;0&#125;;    for (int i = 0; i &lt; G-&gt;vexnum; i++) &#123;        if (!visited[i]) &#123;            DFS(G, i, visited);        &#125;    &#125;&#125;// 内层：从顶点 v 出发，递归访问所有可达的未访问邻接点void DFS(ALGraph *G, int v, int visited[]) &#123;    visited[v] = 1;          // 标记已访问    printf(&quot;%d &quot;, v);        // 访问当前顶点    for (ArcNode *p = G-&gt;vertices[v].firstarc; p; p = p-&gt;nextarc) &#123;        int i = p-&gt;adjvex;        if (!visited[i]) &#123;            DFS(G, i, visited);  // 递归深入        &#125;    &#125;&#125;/*  *  广度优先遍历 BFS *  思路：按层扩散，先近后远；用显式队列实现 *  关键区别：访问一个顶点后，把它所有未访问的邻居都入队，再依次出队处理 */// 外层：遍历所有顶点，保证非连通图也能完整访问void BFSTraverse(ALGraph *G) &#123;    int visited[MAX_VERTEX_NUM] = &#123;0&#125;;    Queue q;    for (int i = 0; i &lt; G-&gt;vexnum; i++) &#123;        if (!visited[i]) &#123;            initQueue(&amp;q);            visited[i] = 1;       // 入队前就要标记，否则可能重复入队            printf(&quot;%d &quot;, i);            enqueue(&amp;q, i);            while (q.front != q.rear) &#123;       // 队列不空就继续                int v = dequeue(&amp;q);           // 取出队头                for (ArcNode *p = G-&gt;vertices[v].firstarc; p; p = p-&gt;nextarc) &#123;                    int w = p-&gt;adjvex;                    if (!visited[w]) &#123;                        visited[w] = 1;       // 入队前标记，防止重复入队                        printf(&quot;%d &quot;, w);                        enqueue(&amp;q, w);                    &#125;                &#125;            &#125;        &#125;    &#125;&#125;//队列操作void initQueue(Queue *q)&#123;    q-&gt;front = 0;    q-&gt;rear = 0;&#125;void enqueue(Queue *q, int x)&#123;    if ((q-&gt;rear + 1) % MAX_VERTEX_NUM == q-&gt;front) &#123;        return;      &#125;    q-&gt;data[q-&gt;rear] = x;    q-&gt;rear = (q-&gt;rear + 1) % MAX_VERTEX_NUM; &#125;int dequeue(Queue *q)&#123;    if (q-&gt;front == q-&gt;rear) &#123;        return -1;     &#125;    int x = q-&gt;data[q-&gt;front];    q-&gt;front = (q-&gt;front + 1) % MAX_VERTEX_NUM;    return x;&#125;/*  *  输入格式：第一行 n（顶点数）m（边数），接下来 m 行每行一条边的两个端点 *  无向图每条边需要 addEdge 两个方向 */int main()&#123;    int n, m;    scanf(&quot;%d %d&quot;, &amp;n, &amp;m);    ALGraph* G = InitGraph(n, m);    for (int i = 0; i &lt; m; i++)    &#123;        int a, b;        scanf(&quot;%d %d&quot;, &amp;a, &amp;b);        addEdge(G, a, b);   // 无向图：两个方向都要加        addEdge(G, b, a);    &#125;    DFSTraverse(G);    printf(&quot;\n&quot;);    BFSTraverse(G);    return 0;&#125;
+
+
+测试与运行示例输入3 30 11 20 2
+
+含义：3 个顶点（0、1、2），3 条无向边，构成一个完全连通三角形。
+输出0 1 2      ← DFS 深度优先遍历0 1 2      ← BFS 广度优先遍历
+
+
+结构体与变量命名解析边的结构体：ArcNode
+Arc：英文原意是”弧”。在图论中，有向边通常被称为”弧（Arc）”，无向边被称为”边（Edge）”。在这里统称边的节点。
+Node：节点。
+变量名拆解：
+adjvex &#x3D; Adjacent + Vex (Vertex的简写)。Adjacent 意思是”邻接的”，Vertex 意思是”顶点”。合起来就是”邻接点”（你要找的那个邻居的下标）。
+nextarc &#x3D; Next + Arc。意思是”下一条弧&#x2F;边”（指向同一个起点的下一条连线）。
+info &#x3D; Information。意思是”信息”（用来存距离、路费等边的权重信息）。
+
+
+
+顶点的结构体：VNode
+V &#x3D; Vertex（顶点）。
+Node &#x3D; 节点。合起来就是”顶点节点”。
+变量名拆解：
+data &#x3D; 数据。这里存的是顶点自己的名字、数据等本体信息。
+firstarc &#x3D; First + Arc。意思是”第一条弧&#x2F;边”（顺着这个指针，就能摸出这个顶点的所有邻居）。
+
+
+
+顶点数组（类型别名）：AdjList
+Adj &#x3D; Adjacency（邻接）。
+List &#x3D; 表&#x2F;列表。合起来就是大名鼎鼎的”邻接表”。
+注意：代码里 typedef VNode AdjList[MAX_VERTEX_NUM]; 的意思就是，以后只要我写 AdjList，它就代表一个装满了 VNode 的大数组。
+
+图的总结构体：ALGraph
+AL &#x3D; Adjacency List（邻接表的缩写）。
+Graph &#x3D; 图。合起来就是”基于邻接表表示的图”。
+(补充：如果是基于邻接矩阵&#x2F;二维数组表示的图，通常叫 MGraph，M 代表 Matrix 矩阵)
+
+
+变量名拆解：
+vertices &#x3D; Vertex 的复数形式。英语里 vertex 变复数不是加 s，而是变成 vertices。意思是”一堆顶点”。它就是那个存了所有顶点的大数组。
+vexnum &#x3D; Vex (Vertex) + Number。顶点的数量。
+arcnum &#x3D; Arc + Number。弧&#x2F;边的数量。
+kind &#x3D; 种类。用来标记这是有向图、无向图、网（带权重的图）等。
+
+
+
+小节三个核心单词：
+
+Vertex（简写 Vex &#x2F; V）：顶点。
+Arc：弧 &#x2F; 边。
+Adjacent（简写 Adj）：邻接的。
+
+三个单词拼在一起，就是整个邻接表的核心逻辑了。
+]]></content>
+      <categories>
+        <category>数据结构</category>
+      </categories>
+      <tags>
+        <tag>数据结构</tag>
+        <tag>C语言</tag>
+        <tag>图</tag>
+        <tag>邻接表</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>vivado安装闪退问题解决</title>
+    <url>/posts/bb1edbca</url>
+    <content><![CDATA[​	在数电课程实验环境搭建需要安装 Vivado，但运行安装包后，程序刚进入安装界面(如下图)就会直接闪退，而且没有任何明确报错信息。
+
+补充说明：安装失败后，Windows 可能会弹出”软件兼容性”相关提示。这个提示大概率只是系统把”异常退出”误判为兼容性问题，并不一定是真正的根因。
+
+
+如果你在安装 Vivado 时也遇到了“打开安装包后立即闪退”的情况，可以先检查下面这个问题。
+排查方法按下 Win + R 打开“运行”，输入 regedit，进入注册表编辑器。
+然后在顶部地址栏中输入以下路径：
+计算机\HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Command Processor
+
+
+进入后，查看右侧是否存在名为 AutoRun 的项(我这里已经删除了)。
+如果它的数值数据是：
+chcp 65001
+
+可以先将这一项删除，然后重新尝试启动 Vivado 安装程序。
+如果没有这个项，或者它的内容不是 chcp 65001，那说明你的闪退问题大概率不是由这里引起的，需要继续排查其他原因。
+
+
+AutoRun 这条注册表项的作用这条配置的含义是：每次启动 cmd 时，都会自动执行一次指定命令。
+如果其内容是 chcp 65001，作用就是：
+
+自动执行命令：启动 cmd 时自动运行 chcp 65001
+切换代码页：把命令行默认代码页切换为 UTF-8（65001）
+
+为什么它可能导致问题Windows 简体中文版的命令行默认代码页通常是 936（GBK），而 chcp 65001 会在 cmd 启动时强制切换到 UTF-8（65001）。
+部分老旧安装程序，或者对命令行编码环境处理不够严谨的软件，在启动过程中如果依赖 cmd、批处理脚本或编码解析，就可能因为代码页被强制修改而出现异常。
+Vivado 对安装环境一向比较敏感，尤其是在以下方面：
+
+安装路径中不能包含中文
+用户目录、临时目录的编码环境
+命令行与脚本执行环境
+
+因此，如果系统通过 AutoRun 强制把 cmd 改成 UTF-8，有可能导致 Vivado 安装器在初始化阶段异常退出。
+这里要说明一点：这并不是 Vivado 闪退的唯一原因，也不能保证所有同类问题都能通过这个方法解决。
+
+
+]]></content>
+      <categories>
+        <category>软件配置</category>
+      </categories>
+  </entry>
+</search>
